@@ -47,29 +47,66 @@ async function fetchJSON(url) {
 
 // Economic calendar for a single date, US-focused. Returns ALL impact levels,
 // each labeled with its folder color (matches standard red/yellow/gray convention).
+//
+// Source: Forex Factory's public calendar feed (nfs.faireconomy.media) — free,
+// no API key, no account. This is the same feed most retail trading tools use
+// under the hood. Finnhub's economic calendar endpoint requires a paid plan
+// even on a free-tier key, so this replaces that entirely.
 function folderLabel(impact) {
   if (impact === "high") return "🔴 Red Folder";
   if (impact === "medium") return "🟡 Yellow Folder";
   return "⚪ No Impact";
 }
 
-async function getEconomicEvents(dateISO) {
-  const url = `${FINNHUB_BASE}/calendar/economic?from=${dateISO}&to=${dateISO}&token=${config.FINNHUB_API_KEY}`;
-  const data = await fetchJSON(url);
-  const events = data.economicCalendar || data.events || [];
-  return events
-    .filter((e) => e.country === "US")
-    .map((e) => ({
-      time: e.time || "TBD",
-      event: e.event,
-      forecast: e.estimate ?? e.forecast ?? null,
-      previous: e.prev ?? e.previous ?? null,
-      impact: e.impact, // "high" | "medium" | "low"
-      folder: folderLabel(e.impact),
-    }));
+function normalizeImpact(ffImpact) {
+  const map = { High: "high", Medium: "medium", Low: "low" };
+  return map[ffImpact] || "low";
 }
 
-// Top general market headlines
+// Fetches both this week's and next week's feed and merges them, so a lookup
+// for "tomorrow" still works correctly even right at a week boundary.
+async function fetchForexFactoryEvents() {
+  const urls = [
+    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+  ];
+  const results = await Promise.allSettled(urls.map((u) => fetchJSON(u)));
+  return results
+    .filter((r) => r.status === "fulfilled")
+    .flatMap((r) => r.value);
+}
+
+function isSameETDate(isoString, targetDateISO) {
+  const d = new Date(isoString);
+  // en-CA locale formats as YYYY-MM-DD, matching our date-string format
+  const etDateStr = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  return etDateStr === targetDateISO;
+}
+
+async function getEconomicEvents(dateISO) {
+  const all = await fetchForexFactoryEvents();
+  const dayEvents = all.filter((e) => e.country === "USD" && e.date && isSameETDate(e.date, dateISO));
+
+  return dayEvents.map((e) => {
+    const impact = normalizeImpact(e.impact);
+    const time = new Date(e.date).toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: "America/New_York",
+    });
+    return {
+      time,
+      event: e.title,
+      forecast: e.forecast || null,
+      previous: e.previous || null,
+      impact,
+      folder: folderLabel(impact),
+    };
+  });
+}
+
+// Top general market headlines — this one still uses Finnhub, since the
+// general news endpoint is genuinely free (unlike the economic calendar).
 async function getMarketHeadlines(limit = 8) {
   const url = `${FINNHUB_BASE}/news?category=general&token=${config.FINNHUB_API_KEY}`;
   const data = await fetchJSON(url);
@@ -239,18 +276,25 @@ async function alertOwner(client, message) {
 
 async function runMorningPost(client) {
   const dateISO = todayISO(0);
-  let events = [];
-  let headlines = [];
+  const [eventsResult, headlinesResult] = await Promise.allSettled([
+    getEconomicEvents(dateISO),
+    getMarketHeadlines(8),
+  ]);
 
-  try {
-    [events, headlines] = await Promise.all([
-      getEconomicEvents(dateISO),
-      getMarketHeadlines(8),
-    ]);
-  } catch (err) {
-    console.error("News bot — data fetch failed, skipping today's post:", err);
-    await alertOwner(client, "Couldn't fetch Finnhub data this morning — no post went out. Check Railway logs.");
+  if (eventsResult.status === "rejected" && headlinesResult.status === "rejected") {
+    console.error("News bot — both data sources failed, skipping today's post:", eventsResult.reason, headlinesResult.reason);
+    await alertOwner(client, "Couldn't fetch either the calendar or headlines this morning — no post went out. Check Railway logs.");
     return;
+  }
+
+  const events = eventsResult.status === "fulfilled" ? eventsResult.value : [];
+  const headlines = headlinesResult.status === "fulfilled" ? headlinesResult.value : [];
+
+  if (eventsResult.status === "rejected") {
+    console.error("News bot — calendar fetch failed, continuing with headlines only:", eventsResult.reason);
+  }
+  if (headlinesResult.status === "rejected") {
+    console.error("News bot — headlines fetch failed, continuing with calendar only:", headlinesResult.reason);
   }
 
   // Try the full Gemini writeup. If it fails for any reason (quota, outage,
@@ -292,4 +336,3 @@ function initNewsBot(client) {
 }
 
 module.exports = { initNewsBot, runMorningPost, runEveningWarning };
-
