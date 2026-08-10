@@ -1,4 +1,4 @@
-**
+/**
  * index.js — Spidey News
  * ---------------------------------------------------------
  * This is a standalone Discord bot, separate from SpideyBot.
@@ -54,3 +54,4 @@ process.on("unhandledRejection", (err) => {
 });
  
 client.login(config.DISCORD_BOT_TOKEN);
+ 
