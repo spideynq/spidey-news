@@ -1,0 +1,16 @@
+{
+  "name": "spidey-news",
+  "version": "1.0.0",
+  "description": "Standalone Discord bot — posts daily NQ market briefs to #spideynq-gems",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
